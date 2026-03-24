@@ -1,0 +1,5 @@
+{
+  "name": "Foot Rush",
+  "description": "Foot Rush & Shoecare: Premium footwear and professional shoe maintenance for the modern athlete.",
+  "requestFramePermissions": ["geolocation"]
+}
