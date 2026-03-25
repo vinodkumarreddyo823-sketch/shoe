@@ -3,9 +3,64 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
+import { getDocFromServer, doc, setDoc, serverTimestamp, collection, query, orderBy, getDocs } from 'firebase/firestore';
+import { signInWithPopup, signOut, onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import { db, auth, googleProvider, facebookProvider } from './firebase';
+
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+export interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string;
+    email?: string | null;
+    emailVerified?: boolean;
+    isAnonymous?: boolean;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
 import { 
   ShoppingBag, 
   Search, 
@@ -28,7 +83,11 @@ import {
   ChevronDown,
   Trash2,
   Plus,
-  Minus
+  Minus,
+  Check,
+  User,
+  LogOut,
+  LogIn
 } from 'lucide-react';
 
 // Components
@@ -72,12 +131,37 @@ interface Product {
   image: string;
   rating: number;
   discount?: number;
-  gender: 'Men' | 'Women' | 'Unisex';
+  gender: 'Men' | 'Women' | 'Unisex' | 'Kids';
+  sizes: string[];
+  colors: string[];
+  isPrime?: boolean;
+}
+
+interface Review {
+  id: string;
+  userId: string;
+  userName: string;
+  rating: number;
+  text: string;
+  createdAt: any;
 }
 
 interface CartItem extends Product {
   quantity: number;
+  selectedSize?: string;
+  selectedColor?: string;
 }
+
+const POPULAR_BRANDS = [
+  { name: 'Nike', logo: 'https://upload.wikimedia.org/wikipedia/commons/a/a6/Logo_NIKE.svg' },
+  { name: 'Adidas', logo: 'https://upload.wikimedia.org/wikipedia/commons/2/20/Adidas_Logo.svg' },
+  { name: 'Puma', logo: 'https://upload.wikimedia.org/wikipedia/en/4/45/Puma_Logo.svg' },
+  { name: 'Reebok', logo: 'https://upload.wikimedia.org/wikipedia/commons/1/11/Reebok_2019_logo.svg' },
+  { name: 'New Balance', logo: 'https://upload.wikimedia.org/wikipedia/commons/e/ea/New_Balance_logo.svg' },
+  { name: 'Vans', logo: 'https://upload.wikimedia.org/wikipedia/commons/9/91/Vans-logo.svg' },
+  { name: 'Converse', logo: 'https://upload.wikimedia.org/wikipedia/commons/3/30/Converse_logo.svg' },
+  { name: 'Asics', logo: 'https://upload.wikimedia.org/wikipedia/commons/b/b1/Asics_Logo.svg' },
+];
 
 const PRODUCTS: Product[] = [
   {
@@ -89,7 +173,10 @@ const PRODUCTS: Product[] = [
     image: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&q=80&w=600",
     rating: 4.8,
     discount: 50,
-    gender: 'Men'
+    gender: 'Men',
+    sizes: ['7', '8', '9', '10', '11'],
+    colors: ['Red', 'Black', 'White'],
+    isPrime: true
   },
   {
     id: 2,
@@ -99,7 +186,9 @@ const PRODUCTS: Product[] = [
     category: "Lifestyle",
     image: "https://images.unsplash.com/photo-1595950653106-6c9ebd614d3a?auto=format&fit=crop&q=80&w=600",
     rating: 4.5,
-    gender: 'Unisex'
+    gender: 'Unisex',
+    sizes: ['6', '7', '8', '9', '10'],
+    colors: ['White', 'Grey', 'Blue']
   },
   {
     id: 3,
@@ -110,7 +199,10 @@ const PRODUCTS: Product[] = [
     image: "https://images.unsplash.com/photo-1606107557195-0e29a4b5b4aa?auto=format&fit=crop&q=80&w=600",
     rating: 4.9,
     discount: 70,
-    gender: 'Men'
+    gender: 'Men',
+    sizes: ['8', '9', '10', '11'],
+    colors: ['Grey', 'Black', 'Green'],
+    isPrime: true
   },
   {
     id: 4,
@@ -120,7 +212,9 @@ const PRODUCTS: Product[] = [
     category: "Basketball",
     image: "https://images.unsplash.com/photo-1549298916-b41d501d3772?auto=format&fit=crop&q=80&w=600",
     rating: 4.7,
-    gender: 'Men'
+    gender: 'Men',
+    sizes: ['9', '10', '11', '12'],
+    colors: ['Blue', 'White', 'Black']
   },
   {
     id: 5,
@@ -131,7 +225,10 @@ const PRODUCTS: Product[] = [
     image: "https://images.unsplash.com/photo-1560769629-975ec94e6a86?auto=format&fit=crop&q=80&w=600",
     rating: 4.6,
     discount: 80,
-    gender: 'Women'
+    gender: 'Women',
+    sizes: ['5', '6', '7', '8'],
+    colors: ['Pink', 'White', 'Black'],
+    isPrime: true
   },
   {
     id: 6,
@@ -142,7 +239,9 @@ const PRODUCTS: Product[] = [
     image: "https://images.unsplash.com/photo-1525966222134-fcfa99b8ae77?auto=format&fit=crop&q=80&w=600",
     rating: 4.4,
     discount: 50,
-    gender: 'Women'
+    gender: 'Women',
+    sizes: ['6', '7', '8'],
+    colors: ['White', 'Black', 'Grey']
   },
   {
     id: 7,
@@ -152,7 +251,9 @@ const PRODUCTS: Product[] = [
     category: "Outdoor",
     image: "https://images.unsplash.com/photo-1539185441755-769473a23570?auto=format&fit=crop&q=80&w=600",
     rating: 5.0,
-    gender: 'Men'
+    gender: 'Men',
+    sizes: ['8', '9', '10', '11', '12'],
+    colors: ['Brown', 'Black']
   },
   {
     id: 8,
@@ -163,7 +264,9 @@ const PRODUCTS: Product[] = [
     image: "https://images.unsplash.com/photo-1514989940723-e8e51635b782?auto=format&fit=crop&q=80&w=600",
     rating: 4.8,
     discount: 70,
-    gender: 'Men'
+    gender: 'Men',
+    sizes: ['9', '10', '11'],
+    colors: ['Black', 'Red', 'White']
   },
   {
     id: 9,
@@ -174,7 +277,9 @@ const PRODUCTS: Product[] = [
     image: "https://images.unsplash.com/photo-1491553895911-0055eca6402d?auto=format&fit=crop&q=80&w=600",
     rating: 4.7,
     discount: 80,
-    gender: 'Unisex'
+    gender: 'Unisex',
+    sizes: ['4', '5', '6', '7', '8', '9', '10', '11'],
+    colors: ['White', 'Black', 'Red', 'Blue']
   },
   {
     id: 10,
@@ -184,7 +289,9 @@ const PRODUCTS: Product[] = [
     category: "Lifestyle",
     image: "https://images.unsplash.com/photo-1525966222134-fcfa99b8ae77?auto=format&fit=crop&q=80&w=600",
     rating: 4.5,
-    gender: 'Unisex'
+    gender: 'Unisex',
+    sizes: ['4', '5', '6', '7', '8', '9', '10', '11'],
+    colors: ['Black', 'White', 'Blue']
   },
   {
     id: 11,
@@ -195,7 +302,9 @@ const PRODUCTS: Product[] = [
     image: "https://images.unsplash.com/photo-1584735175315-9d5df23860e6?auto=format&fit=crop&q=80&w=600",
     rating: 4.9,
     discount: 50,
-    gender: 'Men'
+    gender: 'Men',
+    sizes: ['7', '8', '9', '10', '11'],
+    colors: ['Blue', 'Black', 'Grey']
   },
   {
     id: 12,
@@ -205,7 +314,9 @@ const PRODUCTS: Product[] = [
     category: "Lifestyle",
     image: "https://images.unsplash.com/photo-1512374382149-4332c6c02151?auto=format&fit=crop&q=80&w=600",
     rating: 4.6,
-    gender: 'Unisex'
+    gender: 'Unisex',
+    sizes: ['6', '7', '8', '9', '10'],
+    colors: ['White', 'Black']
   },
   {
     id: 13,
@@ -215,7 +326,9 @@ const PRODUCTS: Product[] = [
     category: "Lifestyle",
     image: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&q=80&w=600",
     rating: 4.4,
-    gender: 'Men'
+    gender: 'Men',
+    sizes: ['7', '8', '9', '10'],
+    colors: ['White', 'Blue', 'Black']
   },
   {
     id: 14,
@@ -226,7 +339,9 @@ const PRODUCTS: Product[] = [
     image: "https://images.unsplash.com/photo-1560769629-975ec94e6a86?auto=format&fit=crop&q=80&w=600",
     rating: 4.2,
     discount: 50,
-    gender: 'Men'
+    gender: 'Men',
+    sizes: ['8', '9', '10'],
+    colors: ['Black', 'Grey']
   },
   {
     id: 15,
@@ -236,7 +351,9 @@ const PRODUCTS: Product[] = [
     category: "Running",
     image: "https://images.unsplash.com/photo-1584735175315-9d5df23860e6?auto=format&fit=crop&q=80&w=600",
     rating: 4.5,
-    gender: 'Men'
+    gender: 'Men',
+    sizes: ['7', '8', '9', '10'],
+    colors: ['White', 'Blue']
   },
   {
     id: 16,
@@ -247,7 +364,9 @@ const PRODUCTS: Product[] = [
     image: "https://images.unsplash.com/photo-1539185441755-769473a23570?auto=format&fit=crop&q=80&w=600",
     rating: 4.3,
     discount: 70,
-    gender: 'Men'
+    gender: 'Men',
+    sizes: ['8', '9', '10', '11'],
+    colors: ['Green', 'Black']
   },
   {
     id: 17,
@@ -257,7 +376,9 @@ const PRODUCTS: Product[] = [
     category: "Lifestyle",
     image: "https://images.unsplash.com/photo-1514989940723-e8e51635b782?auto=format&fit=crop&q=80&w=600",
     rating: 4.6,
-    gender: 'Women'
+    gender: 'Women',
+    sizes: ['5', '6', '7', '8'],
+    colors: ['White', 'Pink']
   },
   {
     id: 18,
@@ -267,125 +388,507 @@ const PRODUCTS: Product[] = [
     category: "Lifestyle",
     image: "https://images.unsplash.com/photo-1491553895911-0055eca6402d?auto=format&fit=crop&q=80&w=600",
     rating: 4.8,
-    gender: 'Unisex'
+    gender: 'Unisex',
+    sizes: ['6', '7', '8', '9', '10'],
+    colors: ['Black', 'White']
   },
   {
-    id: 19,
-    name: "Tech Fleece Hoodie",
-    brand: "Nike",
-    price: 8499,
-    category: "Apparel",
-    image: "https://images.unsplash.com/photo-1556821840-3a63f95609a7?auto=format&fit=crop&q=80&w=600",
-    rating: 4.7,
-    gender: 'Men'
-  },
-  {
-    id: 20,
-    name: "Essential Training Tee",
+    id: 28,
+    name: "Ultra Boost 22",
     brand: "Adidas",
-    price: 2499,
-    category: "Apparel",
-    image: "https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?auto=format&fit=crop&q=80&w=600",
-    rating: 4.5,
-    gender: 'Men'
-  },
-  {
-    id: 21,
-    name: "Performance Leggings",
-    brand: "Nike",
-    price: 4299,
-    category: "Apparel",
-    image: "https://images.unsplash.com/photo-1506629082925-63d627a76e27?auto=format&fit=crop&q=80&w=600",
-    rating: 4.8,
-    gender: 'Women'
-  },
-  {
-    id: 22,
-    name: "Yoga Comfort Top",
-    brand: "Puma",
-    price: 3199,
-    category: "Apparel",
-    image: "https://images.unsplash.com/photo-1518310383802-640c2de311b2?auto=format&fit=crop&q=80&w=600",
-    rating: 4.6,
-    gender: 'Women'
-  },
-  {
-    id: 23,
-    name: "Windbreaker Jacket",
-    brand: "Reebok",
-    price: 6599,
-    category: "Apparel",
-    image: "https://images.unsplash.com/photo-1591047139829-d91aecb6caea?auto=format&fit=crop&q=80&w=600",
-    rating: 4.4,
-    gender: 'Unisex'
-  },
-  {
-    id: 24,
-    name: "Summer Floral Dress",
-    brand: "U.S. Polo Assn.",
-    price: 3899,
-    category: "Apparel",
-    image: "https://images.unsplash.com/photo-1572804013307-f9a85b759015?auto=format&fit=crop&q=80&w=600",
-    rating: 4.6,
-    gender: 'Women'
-  },
-  {
-    id: 25,
-    name: "Slim Fit Chinos",
-    brand: "U.S. Polo Assn.",
-    price: 2999,
-    category: "Apparel",
-    image: "https://images.unsplash.com/photo-1473966968600-fa801b869a1a?auto=format&fit=crop&q=80&w=600",
-    rating: 4.5,
-    gender: 'Men'
-  },
-  {
-    id: 26,
-    name: "Denim Trucker Jacket",
-    brand: "Levi's",
-    price: 5499,
-    category: "Apparel",
-    image: "https://images.unsplash.com/photo-1576995853123-5a103055b19b?auto=format&fit=crop&q=80&w=600",
+    price: 18999,
+    category: "Running",
+    image: "https://images.unsplash.com/photo-1608231387042-66d1773070a5?auto=format&fit=crop&q=80&w=600",
     rating: 4.9,
-    gender: 'Unisex'
+    gender: 'Men',
+    sizes: ['7', '8', '9', '10', '11'],
+    colors: ['Black', 'White', 'Blue']
   },
   {
-    id: 27,
-    name: "Active Sports Bra",
-    brand: "Fila",
-    price: 1899,
-    category: "Apparel",
-    image: "https://images.unsplash.com/photo-1518310383802-640c2de311b2?auto=format&fit=crop&q=80&w=600",
+    id: 29,
+    name: "Air Max 270",
+    brand: "Nike",
+    price: 13999,
+    category: "Lifestyle",
+    image: "https://images.unsplash.com/photo-1543508282-6319a3e2621f?auto=format&fit=crop&q=80&w=600",
+    rating: 4.8,
+    gender: 'Women',
+    sizes: ['5', '6', '7', '8'],
+    colors: ['White', 'Pink', 'Black']
+  },
+  {
+    id: 30,
+    name: "Classic Leather",
+    brand: "Reebok",
+    price: 6999,
+    category: "Lifestyle",
+    image: "https://images.unsplash.com/photo-1512374382149-4332c6c02151?auto=format&fit=crop&q=80&w=600",
+    rating: 4.6,
+    gender: 'Unisex',
+    sizes: ['6', '7', '8', '9', '10'],
+    colors: ['White', 'Black']
+  },
+  {
+    id: 31,
+    name: "Sk8-Hi",
+    brand: "Vans",
+    price: 7499,
+    category: "Lifestyle",
+    image: "https://images.unsplash.com/photo-1525966222134-fcfa99b8ae77?auto=format&fit=crop&q=80&w=600",
     rating: 4.7,
-    gender: 'Women'
+    gender: 'Unisex',
+    sizes: ['4', '5', '6', '7', '8', '9', '10', '11'],
+    colors: ['Black', 'White', 'Blue']
+  },
+  {
+    id: 32,
+    name: "Fresh Foam 1080",
+    brand: "New Balance",
+    price: 15999,
+    category: "Running",
+    image: "https://images.unsplash.com/photo-1606107557195-0e29a4b5b4aa?auto=format&fit=crop&q=80&w=600",
+    rating: 4.8,
+    gender: 'Men',
+    sizes: ['8', '9', '10', '11', '12'],
+    colors: ['Grey', 'Blue', 'Black']
+  },
+  {
+    id: 33,
+    name: "Cali Star",
+    brand: "Puma",
+    price: 8499,
+    category: "Lifestyle",
+    image: "https://images.unsplash.com/photo-1560769629-975ec94e6a86?auto=format&fit=crop&q=80&w=600",
+    rating: 4.5,
+    gender: 'Women',
+    sizes: ['5', '6', '7', '8'],
+    colors: ['White', 'Black']
+  },
+  {
+    id: 38,
+    name: "Junior Speedster",
+    brand: "Nike",
+    price: 4599,
+    category: "Running",
+    image: "https://images.unsplash.com/photo-1514989940723-e8e51635b782?auto=format&fit=crop&q=80&w=600",
+    rating: 4.8,
+    gender: 'Kids',
+    sizes: ['1', '2', '3', '4', '5'],
+    colors: ['Blue', 'Red', 'Black']
+  },
+  {
+    id: 39,
+    name: "Little Explorer Boots",
+    brand: "Timberland",
+    price: 6499,
+    category: "Outdoor",
+    image: "https://images.unsplash.com/photo-1539185441755-769473a23570?auto=format&fit=crop&q=80&w=600",
+    rating: 4.9,
+    gender: 'Kids',
+    sizes: ['1', '2', '3', '4'],
+    colors: ['Brown', 'Yellow']
+  },
+  {
+    id: 40,
+    name: "Kids' Classic Clog",
+    brand: "Puma",
+    price: 2499,
+    category: "Lifestyle",
+    image: "https://images.unsplash.com/photo-1560769629-975ec94e6a86?auto=format&fit=crop&q=80&w=600",
+    rating: 4.5,
+    gender: 'Kids',
+    sizes: ['1', '2', '3'],
+    colors: ['Blue', 'Pink', 'Yellow']
+  },
+  {
+    id: 41,
+    name: "Dino-Stomp Sneakers",
+    brand: "Skechers",
+    price: 3299,
+    category: "Lifestyle",
+    image: "https://images.unsplash.com/photo-1595950653106-6c9ebd614d3a?auto=format&fit=crop&q=80&w=600",
+    rating: 4.7,
+    gender: 'Kids',
+    sizes: ['1', '2', '3', '4'],
+    colors: ['Green', 'Black']
+  },
+  {
+    id: 43,
+    name: "Red Tape Classic Casual",
+    brand: "Red Tape",
+    price: 3499,
+    category: "Casual",
+    image: "https://images.unsplash.com/photo-1525966222134-fcfa99b8ae77?auto=format&fit=crop&q=80&w=600",
+    rating: 4.5,
+    gender: 'Men',
+    sizes: ['7', '8', '9', '10'],
+    colors: ['Brown', 'Black', 'Blue']
+  },
+  {
+    id: 44,
+    name: "Red Tape Urban Sneakers",
+    brand: "Red Tape",
+    price: 4299,
+    category: "Sneakers",
+    image: "https://images.unsplash.com/photo-1595950653106-6c9ebd614d3a?auto=format&fit=crop&q=80&w=600",
+    rating: 4.6,
+    gender: 'Unisex',
+    sizes: ['6', '7', '8', '9', '10'],
+    colors: ['White', 'Black', 'Grey']
+  },
+  {
+    id: 45,
+    name: "Red Tape Pro Runner",
+    brand: "Red Tape",
+    price: 4899,
+    category: "Running",
+    image: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&q=80&w=600",
+    rating: 4.7,
+    gender: 'Men',
+    sizes: ['7', '8', '9', '10', '11'],
+    colors: ['Blue', 'Black', 'Red']
+  },
+  {
+    id: 46,
+    name: "Red Tape Formal Derby",
+    brand: "Red Tape",
+    price: 5999,
+    category: "Formal",
+    image: "https://images.unsplash.com/photo-1533867617858-e7b97e060509?auto=format&fit=crop&q=80&w=600",
+    rating: 4.8,
+    gender: 'Men',
+    sizes: ['7', '8', '9', '10'],
+    colors: ['Black', 'Brown']
+  },
+  {
+    id: 47,
+    name: "Red Tape Suede Loafers",
+    brand: "Red Tape",
+    price: 4599,
+    category: "Loafers",
+    image: "https://images.unsplash.com/photo-1614252235316-8c857d38b5f4?auto=format&fit=crop&q=80&w=600",
+    rating: 4.6,
+    gender: 'Men',
+    sizes: ['7', '8', '9', '10'],
+    colors: ['Blue', 'Tan', 'Grey']
+  },
+  {
+    id: 48,
+    name: "Red Tape Party Wear Special",
+    brand: "Red Tape",
+    price: 6499,
+    category: "Party Wear",
+    image: "https://images.unsplash.com/photo-1549298916-b41d501d3772?auto=format&fit=crop&q=80&w=600",
+    rating: 4.9,
+    gender: 'Men',
+    sizes: ['7', '8', '9', '10'],
+    colors: ['Black', 'Navy']
+  },
+  {
+    id: 49,
+    name: "Red Tape Pure White Sneakers",
+    brand: "Red Tape",
+    price: 3999,
+    category: "Sneakers",
+    image: "https://images.unsplash.com/photo-1560769629-975ec94e6a86?auto=format&fit=crop&q=80&w=600",
+    rating: 4.7,
+    gender: 'Unisex',
+    sizes: ['6', '7', '8', '9', '10'],
+    colors: ['White']
+  },
+  {
+    id: 50,
+    name: "Red Tape Premium Party Loafers",
+    brand: "Red Tape",
+    price: 7299,
+    category: "Party Wear",
+    image: "https://images.unsplash.com/photo-1614252235316-8c857d38b5f4?auto=format&fit=crop&q=80&w=600",
+    rating: 4.9,
+    gender: 'Men',
+    sizes: ['7', '8', '9', '10'],
+    colors: ['Black', 'Burgundy']
+  },
+  {
+    id: 51,
+    name: "Red Tape White Sport Pro",
+    brand: "Red Tape",
+    price: 4199,
+    category: "Running",
+    image: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&q=80&w=600",
+    rating: 4.6,
+    gender: 'Men',
+    sizes: ['7', '8', '9', '10', '11'],
+    colors: ['White', 'Grey']
+  },
+  {
+    id: 52,
+    name: "Red Tape Casual White Slip-on",
+    brand: "Red Tape",
+    price: 2899,
+    category: "Casual",
+    image: "https://images.unsplash.com/photo-1595950653106-6c9ebd614d3a?auto=format&fit=crop&q=80&w=600",
+    rating: 4.4,
+    gender: 'Unisex',
+    sizes: ['6', '7', '8', '9', '10'],
+    colors: ['White']
+  },
+  {
+    id: 53,
+    name: "Comfort Flip Flops",
+    brand: "Puma",
+    price: 1299,
+    category: "Casual",
+    image: "https://images.unsplash.com/photo-1591117207239-78873ee5f747?auto=format&fit=crop&q=80&w=600",
+    rating: 4.2,
+    gender: 'Unisex',
+    sizes: ['6', '7', '8', '9', '10'],
+    colors: ['Blue', 'Black', 'Grey']
+  },
+  {
+    id: 54,
+    name: "Basic Canvas Sneakers",
+    brand: "Vans",
+    price: 999,
+    category: "Sneakers",
+    image: "https://images.unsplash.com/photo-1525966222134-fcfa99b8ae77?auto=format&fit=crop&q=80&w=600",
+    rating: 4.1,
+    gender: 'Unisex',
+    sizes: ['5', '6', '7', '8', '9', '10'],
+    colors: ['Black', 'White', 'Blue']
+  },
+  {
+    id: 60,
+    name: "Kids' Playtime Sandals",
+    brand: "Skechers",
+    price: 899,
+    category: "Lifestyle",
+    image: "https://images.unsplash.com/photo-1514989940723-e8e51635b782?auto=format&fit=crop&q=80&w=600",
+    rating: 4.4,
+    gender: 'Kids',
+    sizes: ['1', '2', '3'],
+    colors: ['Blue', 'Red']
+  },
+  {
+    id: 62,
+    name: "Red Tape Basic Flip Flops",
+    brand: "Red Tape",
+    price: 599,
+    category: "Casual",
+    image: "https://images.unsplash.com/photo-1591117207239-78873ee5f747?auto=format&fit=crop&q=80&w=600",
+    rating: 4.2,
+    gender: 'Men',
+    sizes: ['7', '8', '9', '10'],
+    colors: ['Black', 'Blue']
+  },
+  {
+    id: 63,
+    name: "Red Tape Premium Leather Formal",
+    brand: "Red Tape",
+    price: 8499,
+    category: "Formal",
+    image: "https://images.unsplash.com/photo-1533867617858-e7b97e060509?auto=format&fit=crop&q=80&w=600",
+    rating: 4.9,
+    gender: 'Men',
+    sizes: ['7', '8', '9', '10'],
+    colors: ['Black', 'Brown']
+  },
+  {
+    id: 64,
+    name: "Nike Air Max Pulse",
+    brand: "Nike",
+    price: 13999,
+    category: "Lifestyle",
+    image: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&q=80&w=600",
+    rating: 4.8,
+    gender: 'Unisex',
+    sizes: ['6', '7', '8', '9', '10', '11'],
+    colors: ['Black', 'White', 'Blue']
+  },
+  {
+    id: 65,
+    name: "Adidas Ultraboost Light",
+    brand: "Adidas",
+    price: 18999,
+    category: "Running",
+    image: "https://images.unsplash.com/photo-1587563871167-1ee9c731aefb?auto=format&fit=crop&q=80&w=600",
+    rating: 4.9,
+    gender: 'Men',
+    sizes: ['7', '8', '9', '10', '11'],
+    colors: ['White', 'Black']
+  },
+  {
+    id: 66,
+    name: "Puma Nitro Elite",
+    brand: "Puma",
+    price: 15999,
+    category: "Running",
+    image: "https://images.unsplash.com/photo-1608231387042-66d1773070a5?auto=format&fit=crop&q=80&w=600",
+    rating: 4.7,
+    gender: 'Women',
+    sizes: ['5', '6', '7', '8'],
+    colors: ['Pink', 'White']
+  },
+  {
+    id: 67,
+    name: "Red Tape Party Wear Brogues",
+    brand: "Red Tape",
+    price: 6999,
+    category: "Party Wear",
+    image: "https://images.unsplash.com/photo-1614252235316-8c857d38b5f4?auto=format&fit=crop&q=80&w=600",
+    rating: 4.8,
+    gender: 'Men',
+    sizes: ['7', '8', '9', '10'],
+    colors: ['Black', 'Tan']
   }
 ];
 
 export default function App() {
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    async function testConnection() {
+      try {
+        await getDocFromServer(doc(db, 'test', 'connection'));
+      } catch (error) {
+        if(error instanceof Error && error.message.includes('the client is offline')) {
+          console.error("Please check your Firebase configuration. ");
+        }
+      }
+    }
+    testConnection();
+  }, []);
+
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isCartOpen, setIsCartOpen] = useState(false);
+  const [isAccountOpen, setIsAccountOpen] = useState(false);
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
+  const [orders, setOrders] = useState<any[]>([]);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [isCheckingOut, setIsCheckingOut] = useState(false);
+
+  const handleSocialLogin = async (provider: any) => {
+    setIsLoggingIn(true);
+    try {
+      const result = await signInWithPopup(auth, provider);
+      const user = result.user;
+      
+      // Save user profile to Firestore
+      await setDoc(doc(db, 'users', user.uid), {
+        email: user.email,
+        role: 'user', // Default role
+        createdAt: serverTimestamp()
+      }, { merge: true });
+      
+      setIsAuthModalOpen(false);
+    } catch (error) {
+      console.error("Error signing in:", error);
+      // We don't throw here to avoid breaking the UI for simple login cancellations
+      // But we could show a toast notification here
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setIsAccountOpen(false);
+    } catch (error) {
+      console.error("Error signing out:", error);
+    }
+  };
+
+  const fetchOrders = async () => {
+    if (!user) return;
+    try {
+      const ordersRef = collection(db, 'users', user.uid, 'orders');
+      const q = query(ordersRef, orderBy('createdAt', 'desc'));
+      const snapshot = await getDocs(q);
+      const ordersData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setOrders(ordersData);
+    } catch (error) {
+      console.error("Error fetching orders:", error);
+    }
+  };
+
+  useEffect(() => {
+    if (isAccountOpen && user) {
+      fetchOrders();
+    }
+  }, [isAccountOpen, user]);
+
+  const handleCheckout = async () => {
+    if (!user) {
+      setIsAuthModalOpen(true);
+      return;
+    }
+
+    if (cartItems.length === 0) return;
+
+    setIsCheckingOut(true);
+    try {
+      const orderRef = doc(collection(db, 'users', user.uid, 'orders'));
+      const totalAmount = cartItems.reduce((acc, item) => acc + (item.price * item.quantity), 0);
+      const finalAmount = totalAmount + (totalAmount > 12000 ? 0 : 499);
+      
+      await setDoc(orderRef, {
+        items: cartItems,
+        totalAmount: finalAmount,
+        status: 'pending',
+        createdAt: serverTimestamp()
+      });
+
+      setCartItems([]);
+      setIsCartOpen(false);
+      setIsAccountOpen(true);
+      alert('Order placed successfully!');
+    } catch (error) {
+      console.error("Error placing order:", error);
+      alert('Failed to place order. Please try again.');
+    } finally {
+      setIsCheckingOut(false);
+    }
+  };
   
-  const addToCart = (product: Product) => {
+  const addToCart = (product: Product, size?: string, color?: string) => {
     setCartItems(prev => {
-      const existing = prev.find(item => item.id === product.id);
+      const existing = prev.find(item => 
+        item.id === product.id && 
+        item.selectedSize === size && 
+        item.selectedColor === color
+      );
       if (existing) {
         return prev.map(item => 
-          item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item
+          (item.id === product.id && item.selectedSize === size && item.selectedColor === color)
+            ? { ...item, quantity: item.quantity + 1 } 
+            : item
         );
       }
-      return [...prev, { ...product, quantity: 1 }];
+      return [...prev, { ...product, quantity: 1, selectedSize: size, selectedColor: color }];
     });
     setIsCartOpen(true);
   };
 
-  const removeFromCart = (productId: number) => {
-    setCartItems(prev => prev.filter(item => item.id !== productId));
+  const removeFromCart = (productId: number, size?: string, color?: string) => {
+    setCartItems(prev => prev.filter(item => 
+      !(item.id === productId && item.selectedSize === size && item.selectedColor === color)
+    ));
   };
 
-  const updateQuantity = (productId: number, delta: number) => {
+  const updateQuantity = (productId: number, delta: number, size?: string, color?: string) => {
     setCartItems(prev => prev.map(item => {
-      if (item.id === productId) {
+      if (item.id === productId && item.selectedSize === size && item.selectedColor === color) {
         const newQty = Math.max(1, item.quantity + delta);
         return { ...item, quantity: newQty };
       }
@@ -400,6 +903,64 @@ export default function App() {
   }, 0);
 
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [recentlyViewed, setRecentlyViewed] = useState<Product[]>([]);
+  const [modalSize, setModalSize] = useState<string | null>(null);
+  const [modalColor, setModalColor] = useState<string | null>(null);
+  const [productReviews, setProductReviews] = useState<Review[]>([]);
+  const [newReviewText, setNewReviewText] = useState('');
+  const [newReviewRating, setNewReviewRating] = useState(5);
+  const [isSubmittingReview, setIsSubmittingReview] = useState(false);
+
+  const fetchReviews = async (productId: number) => {
+    try {
+      const reviewsRef = collection(db, 'products', productId.toString(), 'reviews');
+      const q = query(reviewsRef, orderBy('createdAt', 'desc'));
+      const snapshot = await getDocs(q);
+      const reviewsData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as Review[];
+      setProductReviews(reviewsData);
+    } catch (error) {
+      console.error("Error fetching reviews:", error);
+    }
+  };
+
+  const submitReview = async () => {
+    if (!user || !selectedProduct || !newReviewText.trim()) return;
+
+    setIsSubmittingReview(true);
+    try {
+      const reviewsRef = collection(db, 'products', selectedProduct.id.toString(), 'reviews');
+      await setDoc(doc(reviewsRef), {
+        userId: user.uid,
+        userName: user.email?.split('@')[0] || 'Anonymous',
+        rating: newReviewRating,
+        text: newReviewText.trim(),
+        createdAt: serverTimestamp()
+      });
+
+      setNewReviewText('');
+      setNewReviewRating(5);
+      fetchReviews(selectedProduct.id);
+    } catch (error) {
+      console.error("Error submitting review:", error);
+      alert('Failed to submit review. Please try again.');
+    } finally {
+      setIsSubmittingReview(false);
+    }
+  };
+
+  const handleViewProduct = (product: Product) => {
+    setSelectedProduct(product);
+    setModalSize(product.sizes[0] || null);
+    setModalColor(product.colors[0] || null);
+    fetchReviews(product.id);
+    setRecentlyViewed(prev => {
+      const filtered = prev.filter(p => p.id !== product.id);
+      return [product, ...filtered].slice(0, 4);
+    });
+  };
   const [activeFilter, setActiveFilter] = useState('All');
   const [activeGender, setActiveGender] = useState('All');
   const [activeBrand, setActiveBrand] = useState('All');
@@ -408,6 +969,10 @@ export default function App() {
   const [showSaleOnly, setShowSaleOnly] = useState(false);
   const [activeStore, setActiveStore] = useState(0);
   const [userLocation, setUserLocation] = useState<{ lat: number, lng: number } | null>(null);
+  const [priceFilter, setPriceFilter] = useState<'All' | 'Under1000' | 'Above1000'>('All');
+  const [activeSize, setActiveSize] = useState('All');
+  const [activeColor, setActiveColor] = useState('All');
+  const [showPrimeOnly, setShowPrimeOnly] = useState(false);
 
   const stores = [
     {
@@ -415,7 +980,7 @@ export default function App() {
       name: "Bangalore Flagship",
       address: "123, Brigade Road, Ashok Nagar, Bengaluru, Karnataka 560001",
       hours: "Mon - Sat: 10:00 AM - 9:00 PM",
-      phone: "+91 98765 43210",
+      phone: "+91 90322 30204",
       lat: 12.9716,
       lng: 77.5946,
       image: "https://images.unsplash.com/photo-1552346154-21d32810aba3?auto=format&fit=crop&q=80&w=1000"
@@ -425,7 +990,7 @@ export default function App() {
       name: "Mumbai Experience Center",
       address: "Linking Road, Bandra West, Mumbai, Maharashtra 400050",
       hours: "Mon - Sun: 11:00 AM - 10:00 PM",
-      phone: "+91 98765 43211",
+      phone: "+91 90322 30204",
       lat: 19.0760,
       lng: 72.8777,
       image: "https://images.unsplash.com/photo-1560243563-062bff001d68?auto=format&fit=crop&q=80&w=1000"
@@ -435,7 +1000,7 @@ export default function App() {
       name: "Delhi Street Hub",
       address: "Connaught Place, New Delhi, Delhi 110001",
       hours: "Mon - Sat: 10:30 AM - 9:30 PM",
-      phone: "+91 98765 43212",
+      phone: "+91 90322 30204",
       lat: 28.6139,
       lng: 77.2090,
       image: "https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&q=80&w=1000"
@@ -515,7 +1080,13 @@ export default function App() {
                           p.brand.toLowerCase().includes(searchQuery.toLowerCase());
     const matchesRating = p.rating >= minRating;
     const matchesSale = !showSaleOnly || (p.discount !== undefined && p.discount > 0);
-    return matchesCategory && matchesGender && matchesBrand && matchesSearch && matchesRating && matchesSale;
+    const finalPrice = p.discount ? p.price * (1 - p.discount / 100) : p.price;
+    const matchesPrice = priceFilter === 'All' || 
+                        (priceFilter === 'Under1000' ? finalPrice <= 1000 : finalPrice > 1000);
+    const matchesSize = activeSize === 'All' || p.sizes.includes(activeSize);
+    const matchesColor = activeColor === 'All' || p.colors.includes(activeColor);
+    const matchesPrime = !showPrimeOnly || p.isPrime;
+    return matchesCategory && matchesGender && matchesBrand && matchesSearch && matchesRating && matchesSale && matchesPrice && matchesSize && matchesColor && matchesPrime;
   });
 
   const brandStats = Array.from(new Set(PRODUCTS.map(p => p.brand))).map(brand => {
@@ -532,11 +1103,11 @@ export default function App() {
         {/* Top Bar */}
         <div className="bg-slate-900 text-white py-2 px-4 sm:px-6 lg:px-8 text-xs font-medium flex justify-between items-center">
           <div className="flex items-center gap-4">
-            <a href="tel:+919876543210" className="flex items-center gap-1.5 hover:text-orange-500 transition-colors">
+            <a href="tel:+919032230204" className="flex items-center gap-1.5 hover:text-orange-500 transition-colors">
               <Phone size={12} />
-              <span>+91 98765 43210</span>
+              <span>+91 90322 30204</span>
             </a>
-            <a href="https://wa.me/919876543210" target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 hover:text-green-500 transition-colors">
+            <a href="https://wa.me/919032230204" target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 hover:text-green-500 transition-colors">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
                 <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L0 24l6.335-1.662c1.72.94 3.675 1.438 5.662 1.439h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
               </svg>
@@ -590,6 +1161,24 @@ export default function App() {
               <button className="sm:hidden p-2 hover:bg-slate-100 rounded-full transition-colors">
                 <Search size={20} />
               </button>
+
+              {user ? (
+                <button 
+                  className="p-2 hover:bg-slate-100 rounded-full transition-colors relative group"
+                  onClick={() => setIsAccountOpen(true)}
+                  title="My Account"
+                >
+                  <User size={20} />
+                </button>
+              ) : (
+                <button 
+                  className="p-2 hover:bg-slate-100 rounded-full transition-colors relative"
+                  onClick={() => setIsAuthModalOpen(true)}
+                  title="Sign In"
+                >
+                  <User size={20} />
+                </button>
+              )}
 
               <button 
                 className="p-2 hover:bg-slate-100 rounded-full transition-colors relative" 
@@ -649,8 +1238,14 @@ export default function App() {
 
     <main className="pt-24">
         {/* Hero Section */}
-        <section className="relative bg-slate-50 overflow-hidden">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-24 lg:py-32">
+        <section className="relative bg-gradient-to-br from-orange-50 to-orange-100 overflow-hidden">
+          {/* VKR Background Letters */}
+          <div className="absolute inset-0 overflow-hidden pointer-events-none flex items-center justify-center opacity-[0.03]">
+            <span className="font-display text-[40vw] font-black text-orange-900 tracking-tighter leading-none select-none">
+              VKR
+            </span>
+          </div>
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-24 lg:py-32 relative z-10">
             <div className="flex flex-col items-center text-center">
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
@@ -669,7 +1264,7 @@ export default function App() {
                 </p>
                 <div className="flex flex-wrap justify-center gap-4">
                   <button 
-                    onClick={() => addToCart(PRODUCTS[0])}
+                    onClick={() => addToCart(PRODUCTS[0], '9', 'Black')}
                     className="px-10 py-5 bg-orange-600 text-white font-bold rounded-xl hover:bg-orange-700 transition-all flex items-center gap-2 group shadow-xl shadow-orange-200"
                   >
                     Buy Now
@@ -704,6 +1299,43 @@ export default function App() {
           </div>
         </section>
         <section id="shop" className="py-24 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          {/* Popular Brands */}
+          <div className="mb-16">
+            <div className="flex items-center justify-between mb-8">
+              <h2 className="font-display text-2xl font-bold italic">POPULAR BRANDS</h2>
+              <button 
+                onClick={() => setActiveBrand('All')}
+                className="text-sm font-bold text-orange-600 hover:text-orange-700 transition-colors"
+              >
+                View All
+              </button>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-4">
+              {POPULAR_BRANDS.map(brand => (
+                <button
+                  key={brand.name}
+                  onClick={() => setActiveBrand(brand.name === activeBrand ? 'All' : brand.name)}
+                  className={`p-6 rounded-2xl border transition-all flex items-center justify-center aspect-square group ${
+                    activeBrand === brand.name 
+                      ? 'bg-slate-900 border-slate-900 shadow-xl shadow-slate-900/20' 
+                      : 'bg-white border-slate-100 hover:border-orange-200 hover:shadow-lg hover:shadow-orange-900/5'
+                  }`}
+                >
+                  <img 
+                    src={brand.logo} 
+                    alt={brand.name} 
+                    className={`max-w-full max-h-full object-contain transition-all ${
+                      activeBrand === brand.name 
+                        ? 'brightness-0 invert opacity-100 scale-110' 
+                        : 'opacity-50 group-hover:opacity-100 group-hover:scale-110'
+                    }`}
+                    referrerPolicy="no-referrer"
+                  />
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Brand Overview / Rates */}
           <div className="mb-16">
             <h2 className="font-display text-2xl font-bold mb-8 italic">BRAND SPOTLIGHT</h2>
@@ -761,7 +1393,7 @@ export default function App() {
                     Shop the Sale <ArrowRight size={18} />
                   </button>
                   <button 
-                    onClick={() => addToCart(PRODUCTS[0])}
+                    onClick={() => addToCart(PRODUCTS[0], '9', 'Black')}
                     className="px-8 py-4 bg-orange-900/30 backdrop-blur-md text-white border border-white/20 font-bold rounded-xl hover:bg-orange-900/50 transition-all"
                   >
                     Buy Now
@@ -783,6 +1415,54 @@ export default function App() {
             <div className="absolute bottom-0 left-0 w-96 h-96 bg-black/5 rounded-full translate-y-1/2 -translate-x-1/2 blur-3xl" />
           </motion.div>
 
+          {/* Red Tape Spotlight */}
+          <div className="mb-16 bg-slate-900 rounded-3xl p-8 text-white">
+            <div className="flex flex-col md:flex-row items-center justify-between gap-8">
+              <div className="flex-1">
+                <span className="inline-block px-3 py-1 bg-orange-600 text-white text-[10px] font-black rounded-full mb-4 uppercase tracking-widest">
+                  Brand Spotlight
+                </span>
+                <h2 className="text-4xl font-black mb-4">RED TAPE</h2>
+                <p className="text-slate-400 max-w-md mb-8">Discover the latest collection from Red Tape. From casual sneakers to formal classics, we've got you covered.</p>
+                <div className="flex flex-wrap gap-3">
+                  {['Casual', 'Sneakers', 'Running', 'Formal', 'Loafers', 'Party Wear'].map(cat => (
+                    <button 
+                      key={cat}
+                      onClick={() => {
+                        setActiveBrand('Red Tape');
+                        setActiveFilter(cat);
+                        const shopSection = document.getElementById('shop');
+                        if (shopSection) shopSection.scrollIntoView({ behavior: 'smooth' });
+                      }}
+                      className="px-4 py-2 bg-white/10 hover:bg-orange-600 border border-white/10 rounded-xl text-xs font-bold transition-all"
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                  <button 
+                    onClick={() => {
+                      setActiveBrand('Red Tape');
+                      setSearchQuery('white');
+                      const shopSection = document.getElementById('shop');
+                      if (shopSection) shopSection.scrollIntoView({ behavior: 'smooth' });
+                    }}
+                    className="px-4 py-2 bg-white text-slate-900 hover:bg-orange-600 hover:text-white rounded-xl text-xs font-bold transition-all"
+                  >
+                    White Collection
+                  </button>
+                </div>
+              </div>
+              <div className="w-full md:w-1/3 aspect-square rounded-2xl overflow-hidden shadow-2xl shadow-black/50">
+                <img 
+                  src="https://images.unsplash.com/photo-1533867617858-e7b97e060509?auto=format&fit=crop&q=80&w=800"
+                  alt="Red Tape Spotlight"
+                  className="w-full h-full object-cover"
+                  referrerPolicy="no-referrer"
+                />
+              </div>
+            </div>
+          </div>
+
           <div className="flex flex-col md:flex-row justify-between items-end mb-12 gap-6">
             <div>
               <h2 className="font-display text-3xl font-bold mb-2">Featured Drops</h2>
@@ -792,7 +1472,7 @@ export default function App() {
             <div className="flex flex-col gap-4">
               <div className="flex flex-wrap gap-2 justify-end">
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center mr-2">Category:</span>
-                {['All', 'Running', 'Lifestyle', 'Outdoor', 'Basketball', 'Apparel'].map(category => (
+                {['All', 'Running', 'Lifestyle', 'Outdoor', 'Basketball', 'Apparel', 'Casual', 'Sneakers', 'Formal', 'Loafers', 'Party Wear'].map(category => (
                   <button
                     key={category}
                     onClick={() => setActiveFilter(category)}
@@ -809,7 +1489,7 @@ export default function App() {
 
               <div className="flex flex-wrap gap-2 justify-end">
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center mr-2">Gender:</span>
-                {['All', 'Men', 'Women'].map(gender => (
+                {['All', 'Men', 'Women', 'Kids'].map(gender => (
                   <button
                     key={gender}
                     onClick={() => setActiveGender(gender)}
@@ -841,6 +1521,80 @@ export default function App() {
                 ))}
               </div>
               
+              <div className="flex flex-wrap gap-2 justify-end">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center mr-2">Price:</span>
+                <button
+                  onClick={() => setPriceFilter('All')}
+                  className={`px-4 py-2 rounded-full text-xs font-bold transition-all ${
+                    priceFilter === 'All' 
+                      ? 'bg-orange-600 text-white shadow-lg shadow-orange-200' 
+                      : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                  }`}
+                >
+                  All
+                </button>
+                <button
+                  onClick={() => setPriceFilter('Under1000')}
+                  className={`px-4 py-2 rounded-full text-xs font-bold transition-all ${
+                    priceFilter === 'Under1000' 
+                      ? 'bg-orange-600 text-white shadow-lg shadow-orange-200' 
+                      : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                  }`}
+                >
+                  Under ₹1000
+                </button>
+                <button
+                  onClick={() => setPriceFilter('Above1000')}
+                  className={`px-4 py-2 rounded-full text-xs font-bold transition-all ${
+                    priceFilter === 'Above1000' 
+                      ? 'bg-orange-600 text-white shadow-lg shadow-orange-200' 
+                      : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                  }`}
+                >
+                  Above ₹1000
+                </button>
+              </div>
+
+              <div className="flex flex-wrap gap-2 justify-end">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center mr-2">Size:</span>
+                {['All', '6', '7', '8', '9', '10', '11', 'S', 'M', 'L', 'XL'].map(size => (
+                  <button
+                    key={size}
+                    onClick={() => setActiveSize(size)}
+                    className={`px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${
+                      activeSize === size 
+                        ? 'bg-orange-600 text-white shadow-md shadow-orange-200' 
+                        : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                    }`}
+                  >
+                    {size}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap gap-2 justify-end">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center mr-2">Color:</span>
+                {['All', 'White', 'Black', 'Blue', 'Red', 'Grey', 'Green', 'Orange'].map(color => (
+                  <button
+                    key={color}
+                    onClick={() => setActiveColor(color)}
+                    className={`px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all flex items-center gap-1.5 ${
+                      activeColor === color 
+                        ? 'bg-orange-600 text-white shadow-md shadow-orange-200' 
+                        : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                    }`}
+                  >
+                    {color !== 'All' && (
+                      <span 
+                        className="w-2 h-2 rounded-full border border-white/20" 
+                        style={{ backgroundColor: color.toLowerCase() }} 
+                      />
+                    )}
+                    {color}
+                  </button>
+                ))}
+              </div>
+
               <div className="flex flex-wrap gap-2 justify-end">
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center mr-2">Min Rating:</span>
                 {[0, 3, 4].map(rating => (
@@ -875,9 +1629,20 @@ export default function App() {
                   <Sparkles size={10} className={showSaleOnly ? 'text-white' : 'text-orange-600'} />
                   Sale Only
                 </button>
+                <button
+                  onClick={() => setShowPrimeOnly(!showPrimeOnly)}
+                  className={`px-4 py-2 rounded-full text-xs font-bold transition-all flex items-center gap-1.5 ${
+                    showPrimeOnly 
+                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-200' 
+                      : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                  }`}
+                >
+                  <Check size={10} className={showPrimeOnly ? 'text-white' : 'text-blue-600'} />
+                  Prime
+                </button>
               </div>
 
-              {(activeFilter !== 'All' || activeGender !== 'All' || activeBrand !== 'All' || searchQuery !== '' || minRating !== 0 || showSaleOnly) && (
+              {(activeFilter !== 'All' || activeGender !== 'All' || activeBrand !== 'All' || searchQuery !== '' || minRating !== 0 || showSaleOnly || showPrimeOnly || activeSize !== 'All' || activeColor !== 'All') && (
                 <button 
                   onClick={() => {
                     setActiveFilter('All');
@@ -886,6 +1651,9 @@ export default function App() {
                     setSearchQuery('');
                     setMinRating(0);
                     setShowSaleOnly(false);
+                    setShowPrimeOnly(false);
+                    setActiveSize('All');
+                    setActiveColor('All');
                   }}
                   className="text-[10px] font-bold text-orange-600 uppercase tracking-widest hover:underline text-right"
                 >
@@ -910,14 +1678,23 @@ export default function App() {
                     exit={{ opacity: 0, scale: 0.9 }}
                     transition={{ duration: 0.3 }}
                     className="group cursor-pointer"
-                    onClick={() => setSelectedProduct(product)}
+                    onClick={() => {
+                      handleViewProduct(product);
+                    }}
                   >
                   <div className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden mb-4">
-                    {product.discount && (
-                      <div className="absolute top-3 left-3 z-10 bg-orange-600 text-white text-[10px] font-black px-2 py-1 rounded-lg shadow-lg">
-                        {product.discount}% OFF
-                      </div>
-                    )}
+                    <div className="absolute top-3 left-3 z-10 flex flex-col gap-2">
+                      {product.discount && (
+                        <div className="bg-orange-600 text-white text-[10px] font-black px-2 py-1 rounded-lg shadow-lg w-fit">
+                          {product.discount}% OFF
+                        </div>
+                      )}
+                      {product.isPrime && (
+                        <div className="bg-blue-600 text-white text-[10px] font-black px-2 py-1 rounded-lg shadow-lg flex items-center gap-1 w-fit">
+                          <Check size={10} /> PRIME
+                        </div>
+                      )}
+                    </div>
                     <img 
                       src={product.image} 
                       alt={product.name}
@@ -929,7 +1706,7 @@ export default function App() {
                       <button 
                         onClick={(e) => {
                           e.stopPropagation();
-                          addToCart(product);
+                          addToCart(product, product.sizes[0], product.colors[0]);
                         }}
                         className="flex-1 bg-orange-600 text-white py-3 rounded-xl font-bold text-sm hover:bg-orange-700 transition-colors shadow-lg shadow-orange-900/20"
                       >
@@ -938,7 +1715,7 @@ export default function App() {
                       <button 
                         onClick={(e) => {
                           e.stopPropagation();
-                          setSelectedProduct(product);
+                          handleViewProduct(product);
                         }}
                         className="px-4 bg-white/90 backdrop-blur-sm py-3 rounded-xl font-bold text-sm hover:bg-white transition-colors text-slate-900"
                       >
@@ -992,6 +1769,10 @@ export default function App() {
                     setActiveGender('All');
                     setActiveBrand('All');
                     setMinRating(0);
+                    setShowSaleOnly(false);
+                    setShowPrimeOnly(false);
+                    setActiveSize('All');
+                    setActiveColor('All');
                   }}
                   className="mt-6 px-6 py-3 bg-slate-900 text-white font-bold rounded-xl hover:bg-orange-600 transition-all"
                 >
@@ -1001,6 +1782,43 @@ export default function App() {
             )}
             </AnimatePresence>
           </motion.div>
+
+          {/* Recently Viewed Products */}
+          {recentlyViewed.length > 0 && (
+            <div className="mt-24">
+              <div className="flex items-center justify-between mb-8">
+                <h2 className="font-display text-2xl font-bold italic">RECENTLY VIEWED</h2>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 sm:gap-8">
+                {recentlyViewed.map((product) => (
+                  <motion.div
+                    key={`recent-${product.id}`}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="group cursor-pointer"
+                    onClick={() => handleViewProduct(product)}
+                  >
+                    <div className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden mb-4">
+                      <img 
+                        src={product.image} 
+                        alt={product.name}
+                        className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
+                        referrerPolicy="no-referrer"
+                      />
+                      <div className="absolute inset-0 bg-black/5 group-hover:bg-black/20 transition-colors duration-300" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <p className="text-[10px] text-orange-600 font-black uppercase tracking-widest">{product.brand}</p>
+                      </div>
+                      <h3 className="font-bold text-sm group-hover:text-orange-600 transition-colors truncate">{product.name}</h3>
+                      <p className="text-sm font-black mt-1">₹{product.price.toLocaleString('en-IN')}</p>
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Limited Edition Spotlight */}
@@ -1044,8 +1862,10 @@ export default function App() {
                         category: "Limited Edition",
                         image: "https://images.unsplash.com/photo-1512374382149-4332c6c02151?auto=format&fit=crop&q=80&w=1000",
                         rating: 5.0,
-                        gender: 'Men'
-                      })}
+                        gender: 'Men',
+                        sizes: ['8', '9', '10', '11'],
+                        colors: ['Black', 'Silver']
+                      }, '10', 'Black')}
                       className="px-8 py-4 bg-orange-600 text-white font-bold rounded-xl hover:bg-orange-700 transition-all flex items-center gap-2 shadow-lg shadow-orange-900/40"
                     >
                       Buy Now
@@ -1464,9 +2284,9 @@ export default function App() {
                 </a>
               </div>
               <div className="pt-4 space-y-2">
-                <a href="tel:+919876543210" className="flex items-center gap-2 text-slate-500 hover:text-orange-600 transition-colors text-sm">
+                <a href="tel:+919032230204" className="flex items-center gap-2 text-slate-500 hover:text-orange-600 transition-colors text-sm">
                   <Phone size={16} />
-                  <span>+91 98765 43210</span>
+                  <span>+91 90322 30204</span>
                 </a>
                 <div className="flex items-start gap-2 text-slate-500 text-sm">
                   <MapPin size={16} className="mt-1 flex-shrink-0" />
@@ -1567,6 +2387,11 @@ export default function App() {
                       <span className="inline-block px-3 py-1 bg-slate-100 text-slate-600 text-[10px] font-bold rounded-full uppercase tracking-widest">
                         {selectedProduct.gender}
                       </span>
+                      {selectedProduct.isPrime && (
+                        <span className="inline-flex items-center gap-1 px-3 py-1 bg-blue-600 text-white text-[10px] font-bold rounded-full uppercase tracking-widest">
+                          <Check size={10} /> PRIME
+                        </span>
+                      )}
                     </div>
                     <h2 className="font-display text-3xl sm:text-4xl font-bold mb-2">{selectedProduct.name}</h2>
                     <div className="flex items-center gap-2 mb-6">
@@ -1588,9 +2413,33 @@ export default function App() {
                     <div className="mb-8">
                       <h4 className="font-bold text-sm uppercase tracking-widest mb-4">Select Size</h4>
                       <div className="flex flex-wrap gap-2">
-                        {['US 7', 'US 8', 'US 9', 'US 10', 'US 11', 'US 12'].map(size => (
-                          <button key={size} className="w-14 h-12 border border-slate-200 rounded-xl flex items-center justify-center text-sm font-bold hover:border-orange-600 hover:text-orange-600 transition-all">
-                            {size.split(' ')[1]}
+                        {selectedProduct.sizes.map(size => (
+                          <button 
+                            key={size} 
+                            onClick={() => setModalSize(size)}
+                            className={`w-14 h-12 border rounded-xl flex items-center justify-center text-sm font-bold transition-all ${
+                              modalSize === size ? 'border-orange-600 text-orange-600 bg-orange-50' : 'border-slate-200 hover:border-orange-600 hover:text-orange-600'
+                            }`}
+                          >
+                            {size}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="mb-8">
+                      <h4 className="font-bold text-sm uppercase tracking-widest mb-4">Select Color</h4>
+                      <div className="flex flex-wrap gap-2">
+                        {selectedProduct.colors.map(color => (
+                          <button 
+                            key={color} 
+                            onClick={() => setModalColor(color)}
+                            className={`px-4 py-2 border rounded-xl flex items-center gap-2 text-sm font-bold transition-all ${
+                              modalColor === color ? 'border-orange-600 text-orange-600 bg-orange-50' : 'border-slate-200 hover:border-orange-600 hover:text-orange-600'
+                            }`}
+                          >
+                            <span className="w-3 h-3 rounded-full border border-black/10" style={{ backgroundColor: color.toLowerCase() }} />
+                            {color}
                           </button>
                         ))}
                       </div>
@@ -1611,7 +2460,7 @@ export default function App() {
                     <div className="flex flex-col gap-3">
                       <button 
                         onClick={() => {
-                          addToCart(selectedProduct);
+                          addToCart(selectedProduct, modalSize || undefined, modalColor || undefined);
                           setSelectedProduct(null);
                         }}
                         className="w-full px-8 py-4 bg-orange-600 text-white font-bold rounded-xl hover:bg-orange-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-orange-200"
@@ -1620,7 +2469,7 @@ export default function App() {
                       </button>
                       <button 
                         onClick={() => {
-                          addToCart(selectedProduct);
+                          addToCart(selectedProduct, modalSize || undefined, modalColor || undefined);
                           setSelectedProduct(null);
                         }}
                         className="w-full px-8 py-4 bg-slate-100 text-slate-900 font-bold rounded-xl hover:bg-slate-200 transition-all flex items-center justify-center gap-2"
@@ -1637,6 +2486,82 @@ export default function App() {
                         <MapPin size={18} className="text-orange-600" />
                         Pick up in Store
                       </button>
+                    </div>
+                  </div>
+                  
+                  {/* Reviews Section */}
+                  <div className="mt-12 pt-12 border-t border-slate-100">
+                    <h3 className="text-2xl font-bold mb-8">Customer Reviews</h3>
+                    
+                    {user ? (
+                      <div className="bg-slate-50 p-6 rounded-2xl mb-8">
+                        <h4 className="font-bold mb-4">Write a Review</h4>
+                        <div className="flex gap-2 mb-4">
+                          {[1, 2, 3, 4, 5].map((star) => (
+                            <button
+                              key={star}
+                              onClick={() => setNewReviewRating(star)}
+                              className="focus:outline-none"
+                            >
+                              <Star 
+                                size={24} 
+                                className={star <= newReviewRating ? "fill-orange-400 text-orange-400" : "text-slate-300 hover:text-orange-300"} 
+                              />
+                            </button>
+                          ))}
+                        </div>
+                        <textarea
+                          value={newReviewText}
+                          onChange={(e) => setNewReviewText(e.target.value)}
+                          placeholder="What did you think about this product?"
+                          className="w-full p-4 rounded-xl border border-slate-200 mb-4 focus:outline-none focus:ring-2 focus:ring-orange-600 focus:border-transparent resize-none h-24"
+                        />
+                        <button
+                          onClick={submitReview}
+                          disabled={isSubmittingReview || !newReviewText.trim()}
+                          className="px-6 py-3 bg-slate-900 text-white font-bold rounded-xl hover:bg-orange-600 transition-all disabled:opacity-50 flex items-center gap-2"
+                        >
+                          {isSubmittingReview ? <Loader2 size={18} className="animate-spin" /> : null}
+                          Submit Review
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="bg-orange-50 p-6 rounded-2xl mb-8 flex items-center justify-between">
+                        <p className="text-orange-800 font-medium">Sign in to leave a review</p>
+                        <button 
+                          onClick={() => setIsAuthModalOpen(true)}
+                          className="px-6 py-2 bg-white text-orange-600 font-bold rounded-lg hover:bg-orange-100 transition-colors"
+                        >
+                          Sign In
+                        </button>
+                      </div>
+                    )}
+
+                    <div className="space-y-6">
+                      {productReviews.length > 0 ? (
+                        productReviews.map((review) => (
+                          <div key={review.id} className="border-b border-slate-100 pb-6 last:border-0">
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="font-bold text-slate-900">{review.userName}</span>
+                              <span className="text-sm text-slate-500">
+                                {review.createdAt?.toDate ? new Date(review.createdAt.toDate()).toLocaleDateString() : 'Just now'}
+                              </span>
+                            </div>
+                            <div className="flex gap-1 mb-3">
+                              {[...Array(5)].map((_, i) => (
+                                <Star 
+                                  key={i} 
+                                  size={14} 
+                                  className={i < review.rating ? "fill-orange-400 text-orange-400" : "text-slate-200"} 
+                                />
+                              ))}
+                            </div>
+                            <p className="text-slate-600 leading-relaxed">{review.text}</p>
+                          </div>
+                        ))
+                      ) : (
+                        <p className="text-slate-500 italic">No reviews yet. Be the first to review this product!</p>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1682,7 +2607,7 @@ export default function App() {
               {cartItems.length > 0 ? (
                 <div className="space-y-6">
                   {cartItems.map((item) => (
-                    <div key={item.id} className="flex gap-4">
+                    <div key={`${item.id}-${item.selectedSize}-${item.selectedColor}`} className="flex gap-4">
                       <div className="w-24 h-24 bg-slate-100 rounded-xl overflow-hidden flex-shrink-0">
                         <img 
                           src={item.image} 
@@ -1695,24 +2620,31 @@ export default function App() {
                         <div className="flex justify-between items-start mb-1">
                           <h3 className="font-bold text-sm truncate pr-2">{item.name}</h3>
                           <button 
-                            onClick={() => removeFromCart(item.id)}
+                            onClick={() => removeFromCart(item.id, item.selectedSize, item.selectedColor)}
                             className="text-slate-400 hover:text-red-500 transition-colors"
                           >
                             <Trash2 size={16} />
                           </button>
                         </div>
-                        <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-2">{item.brand} • {item.category}</p>
+                        <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1">{item.brand} • {item.category}</p>
+                        {(item.selectedSize || item.selectedColor) && (
+                          <p className="text-[10px] text-orange-600 font-bold uppercase tracking-wider mb-2">
+                            {item.selectedSize && `Size: ${item.selectedSize}`}
+                            {item.selectedSize && item.selectedColor && ' • '}
+                            {item.selectedColor && `Color: ${item.selectedColor}`}
+                          </p>
+                        )}
                         <div className="flex items-center justify-between">
                           <div className="flex items-center border border-slate-200 rounded-lg overflow-hidden">
                             <button 
-                              onClick={() => updateQuantity(item.id, -1)}
+                              onClick={() => updateQuantity(item.id, -1, item.selectedSize, item.selectedColor)}
                               className="p-1.5 hover:bg-slate-50 transition-colors"
                             >
                               <Minus size={12} />
                             </button>
                             <span className="px-3 text-xs font-bold w-8 text-center">{item.quantity}</span>
                             <button 
-                              onClick={() => updateQuantity(item.id, 1)}
+                              onClick={() => updateQuantity(item.id, 1, item.selectedSize, item.selectedColor)}
                               className="p-1.5 hover:bg-slate-50 transition-colors"
                             >
                               <Plus size={12} />
@@ -1760,14 +2692,205 @@ export default function App() {
                   </div>
                 </div>
                 <button 
-                  onClick={() => alert('Checkout functionality coming soon!')}
-                  className="w-full py-4 bg-orange-600 text-white font-bold rounded-xl hover:bg-orange-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-orange-200"
+                  onClick={handleCheckout}
+                  disabled={isCheckingOut}
+                  className="w-full py-4 bg-orange-600 text-white font-bold rounded-xl hover:bg-orange-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-orange-200 disabled:opacity-50"
                 >
-                  Checkout Now
-                  <ArrowRight size={18} />
+                  {isCheckingOut ? (
+                    <>
+                      <Loader2 size={18} className="animate-spin" />
+                      Processing...
+                    </>
+                  ) : (
+                    <>
+                      Checkout Now
+                      <ArrowRight size={18} />
+                    </>
+                  )}
                 </button>
               </div>
             )}
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
+
+    {/* Account Sidebar */}
+    <AnimatePresence>
+      {isAccountOpen && (
+        <>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setIsAccountOpen(false)}
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100]"
+          />
+          <motion.div
+            initial={{ x: '100%' }}
+            animate={{ x: 0 }}
+            exit={{ x: '100%' }}
+            transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+            className="fixed inset-y-0 right-0 w-full sm:w-[400px] bg-white shadow-2xl z-[101] flex flex-col"
+          >
+            <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-white">
+              <div className="flex items-center gap-3">
+                <User className="text-orange-600" />
+                <h2 className="text-xl font-bold">My Account</h2>
+              </div>
+              <button 
+                onClick={() => setIsAccountOpen(false)}
+                className="p-2 hover:bg-slate-100 rounded-full transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6">
+              {user && (
+                <div className="mb-8 p-4 bg-slate-50 rounded-xl border border-slate-100">
+                  <p className="text-sm text-slate-500 mb-1">Logged in as</p>
+                  <p className="font-bold text-slate-900 truncate">{user.email}</p>
+                  <button 
+                    onClick={handleLogout}
+                    className="mt-4 flex items-center gap-2 text-sm text-red-600 font-medium hover:text-red-700 transition-colors"
+                  >
+                    <LogOut size={16} />
+                    Sign Out
+                  </button>
+                </div>
+              )}
+
+              <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
+                <ShoppingBag size={18} className="text-slate-400" />
+                Order History
+              </h3>
+
+              {orders.length > 0 ? (
+                <div className="space-y-4">
+                  {orders.map((order) => (
+                    <div key={order.id} className="border border-slate-200 rounded-xl p-4">
+                      <div className="flex justify-between items-start mb-3">
+                        <div>
+                          <p className="text-xs text-slate-500 mb-1">Order #{order.id.slice(0, 8)}</p>
+                          <p className="text-sm font-medium">
+                            {order.createdAt?.toDate ? new Date(order.createdAt.toDate()).toLocaleDateString() : 'Recent'}
+                          </p>
+                        </div>
+                        <span className={`px-2 py-1 rounded text-xs font-bold capitalize ${
+                          order.status === 'delivered' ? 'bg-green-100 text-green-700' :
+                          order.status === 'shipped' ? 'bg-blue-100 text-blue-700' :
+                          'bg-orange-100 text-orange-700'
+                        }`}>
+                          {order.status}
+                        </span>
+                      </div>
+                      
+                      <div className="space-y-2 mb-3">
+                        {order.items.map((item: any, idx: number) => (
+                          <div key={idx} className="flex items-center gap-3">
+                            <img src={item.image} alt={item.name} className="w-10 h-10 object-cover rounded bg-slate-100" />
+                            <div className="flex-1">
+                              <p className="text-sm font-medium line-clamp-1">{item.name}</p>
+                              <p className="text-xs text-slate-500">Qty: {item.quantity}</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      
+                      <div className="pt-3 border-t border-slate-100 flex justify-between items-center">
+                        <span className="text-sm font-medium text-slate-500">Total</span>
+                        <span className="font-bold">₹{order.totalAmount.toLocaleString('en-IN')}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-12">
+                  <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <ShoppingBag size={24} className="text-slate-400" />
+                  </div>
+                  <p className="text-slate-500">No orders found.</p>
+                </div>
+              )}
+            </div>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
+
+    {/* Auth Modal */}
+    <AnimatePresence>
+      {isAuthModalOpen && (
+        <>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50"
+            onClick={() => setIsAuthModalOpen(false)}
+          />
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 20 }}
+            className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-white rounded-2xl shadow-2xl z-50 overflow-hidden"
+          >
+            <div className="p-6 md:p-8">
+              <div className="flex justify-between items-center mb-8">
+                <Logo variant="dark" />
+                <button 
+                  onClick={() => setIsAuthModalOpen(false)}
+                  className="p-2 hover:bg-slate-100 rounded-full transition-colors"
+                >
+                  <X size={20} className="text-slate-500" />
+                </button>
+              </div>
+
+              <div className="text-center mb-8">
+                <h2 className="text-2xl font-black text-slate-900 mb-2">Welcome to Foot Rush</h2>
+                <p className="text-slate-500">Sign in to save your cart and track orders.</p>
+              </div>
+
+              <div className="space-y-4">
+                <button
+                  onClick={() => handleSocialLogin(googleProvider)}
+                  disabled={isLoggingIn}
+                  className="w-full flex items-center justify-center gap-3 py-3 px-4 bg-white border border-slate-200 rounded-xl text-slate-700 font-semibold hover:bg-slate-50 hover:border-slate-300 transition-all disabled:opacity-50"
+                >
+                  {isLoggingIn ? (
+                    <Loader2 size={20} className="animate-spin" />
+                  ) : (
+                    <svg className="w-5 h-5" viewBox="0 0 24 24">
+                      <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4" />
+                      <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
+                      <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
+                      <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
+                    </svg>
+                  )}
+                  Continue with Google
+                </button>
+
+                <button
+                  onClick={() => handleSocialLogin(facebookProvider)}
+                  disabled={isLoggingIn}
+                  className="w-full flex items-center justify-center gap-3 py-3 px-4 bg-[#1877F2] text-white rounded-xl font-semibold hover:bg-[#166FE5] transition-all disabled:opacity-50"
+                >
+                  {isLoggingIn ? (
+                    <Loader2 size={20} className="animate-spin" />
+                  ) : (
+                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.469h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.469h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" />
+                    </svg>
+                  )}
+                  Continue with Facebook
+                </button>
+              </div>
+
+              <div className="mt-8 text-center text-sm text-slate-500">
+                By continuing, you agree to our <a href="#" className="text-orange-600 hover:underline">Terms of Service</a> and <a href="#" className="text-orange-600 hover:underline">Privacy Policy</a>.
+              </div>
+            </div>
           </motion.div>
         </>
       )}

@@ -1,0 +1,208 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: products
+    // Document ID: auto-generated
+    // Fields:
+    //   - name: string (required, max 100 chars)
+    //   - brand: string (required, max 50 chars)
+    //   - price: number (required, > 0)
+    //   - category: string (required, max 50 chars)
+    //   - image: string (required, valid url)
+    //   - rating: number (required, 0-5)
+    //   - discount: number (optional, 0-100)
+    //   - gender: string (required, Men|Women|Unisex|Kids)
+    //   - sizes: list of strings (required, max 20 items)
+    //   - colors: list of strings (required, max 20 items)
+    //   - isPrime: boolean (optional)
+    //
+    // Collection: products/{productId}/reviews
+    // Document ID: auto-generated
+    // Fields:
+    //   - userId: string (required)
+    //   - userName: string (required)
+    //   - rating: number (required, 1-5)
+    //   - text: string (required, max 1000 chars)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: users
+    // Document ID: user uid
+    // Fields:
+    //   - email: string (required, valid email)
+    //   - role: string (required, admin|user)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: users/{userId}/cart
+    // Document ID: auto-generated
+    // Fields:
+    //   - productId: string (required)
+    //   - quantity: number (required, > 0)
+    //   - selectedSize: string (optional)
+    //   - selectedColor: string (optional)
+    //
+    // Collection: users/{userId}/orders
+    // Document ID: auto-generated
+    // Fields:
+    //   - items: list of objects (required, max 50 items)
+    //   - totalAmount: number (required, >= 0)
+    //   - status: string (required, pending|processing|shipped|delivered)
+    //   - createdAt: timestamp (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "vinodkumarreddyo823@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function validStringLength(field, minLen, maxLen) {
+      return request.resource.data[field] is string &&
+        request.resource.data[field].size() >= minLen &&
+        request.resource.data[field].size() <= maxLen;
+    }
+
+    function isValidUrl(url) {
+      return url is string &&
+        (url.matches("^https://.*") || url.matches("^http://.*"));
+    }
+
+    function isValidEmail(email) {
+      return email is string &&
+        email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isPositive(field) {
+      return request.resource.data[field] is number && request.resource.data[field] > 0;
+    }
+
+    function isValidList(list, maxSize) {
+      return list is list && list.size() <= maxSize;
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidProduct() {
+      let data = request.resource.data;
+      return hasRequiredFields(['name', 'brand', 'price', 'category', 'image', 'rating', 'gender', 'sizes', 'colors']) &&
+             validStringLength('name', 1, 100) &&
+             validStringLength('brand', 1, 50) &&
+             isPositive('price') &&
+             validStringLength('category', 1, 50) &&
+             isValidUrl(data.image) &&
+             data.rating is number && data.rating >= 0 && data.rating <= 5 &&
+             (!('discount' in data) || (data.discount is number && data.discount >= 0 && data.discount <= 100)) &&
+             data.gender in ['Men', 'Women', 'Unisex', 'Kids'] &&
+             isValidList(data.sizes, 20) &&
+             isValidList(data.colors, 20) &&
+             (!('isPrime' in data) || data.isPrime is bool);
+    }
+
+    function isValidUser() {
+      let data = request.resource.data;
+      return hasRequiredFields(['email', 'role', 'createdAt']) &&
+             isValidEmail(data.email) &&
+             data.role in ['admin', 'user'] &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidCartItem() {
+      let data = request.resource.data;
+      return hasRequiredFields(['productId', 'quantity']) &&
+             data.productId is string && data.productId.size() > 0 && data.productId.size() < 100 &&
+             isPositive('quantity') &&
+             (!('selectedSize' in data) || (data.selectedSize is string && data.selectedSize.size() < 50)) &&
+             (!('selectedColor' in data) || (data.selectedColor is string && data.selectedColor.size() < 50));
+    }
+
+    function isValidOrder() {
+      let data = request.resource.data;
+      return hasRequiredFields(['items', 'totalAmount', 'status', 'createdAt']) &&
+             isValidList(data.items, 50) &&
+             data.totalAmount is number && data.totalAmount >= 0 &&
+             data.status in ['pending', 'processing', 'shipped', 'delivered'] &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidReview() {
+      let data = request.resource.data;
+      return hasRequiredFields(['userId', 'userName', 'rating', 'text', 'createdAt']) &&
+             data.userId == request.auth.uid &&
+             data.userName is string && data.userName.size() > 0 && data.userName.size() <= 100 &&
+             data.rating is number && data.rating >= 1 && data.rating <= 5 &&
+             data.text is string && data.text.size() > 0 && data.text.size() <= 1000 &&
+             data.createdAt is timestamp;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /products/{productId} {
+      allow read: if true;
+      allow create: if isAdmin() && isValidProduct();
+      allow update: if isAdmin() && isValidProduct();
+      allow delete: if isAdmin();
+
+      match /reviews/{reviewId} {
+        allow read: if true;
+        allow create: if isAuthenticated() && isValidReview();
+        allow update: if isOwner(resource.data.userId) && isValidReview() && request.resource.data.createdAt == resource.data.createdAt;
+        allow delete: if isOwner(resource.data.userId) || isAdmin();
+      }
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      // Users can create their own profile, but cannot assign themselves 'admin' role unless they are already admin
+      allow create: if isAuthenticated() && isValidUser() && 
+                    ((isOwner(userId) && request.resource.data.role == 'user') || isAdmin());
+      // Users can update their own profile, but cannot change their role
+      allow update: if isAuthenticated() && isValidUser() && 
+                    ((isOwner(userId) && request.resource.data.role == resource.data.role && request.resource.data.createdAt == resource.data.createdAt) || isAdmin());
+      allow delete: if isAdmin();
+      
+      match /cart/{cartItemId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) && isValidCartItem();
+        allow update: if isOwner(userId) && isValidCartItem();
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      match /orders/{orderId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) && isValidOrder();
+        allow update: if isAdmin() && isValidOrder();
+        allow delete: if isAdmin();
+      }
+    }
+  }
+}
